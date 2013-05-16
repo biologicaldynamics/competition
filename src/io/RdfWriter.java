@@ -1,0 +1,294 @@
+package io;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.SortedSet;
+import java.util.TreeSet;
+
+import operations.processes.AbstractLifeCycle;
+import structures.cell.AbstractCell;
+import control.parameters.Parameters;
+
+/**
+ * 
+ * Copyright (c) 2013, David Bruce Borenstein.
+ * 
+ * This file is part of the source code for "Non-local interaction via diffusible resource 
+ * prevents coexistence of cooperators and cheaters in a lattice model"
+ * (PLOS ONE, Borenstein, et al. 2013).
+ * 
+ * This work is licensed under the Creative Commons 2.0 BY-NC license.
+ * 
+ * Attribute (BY) -- You must attribute the work in the manner specified 
+ * by the author or licensor (but not in any way that suggests that they 
+ * endorse you or your use of the work).
+ * 
+ * Noncommercial (NC) -- You may not use this work for commercial purposes.
+ * 
+ * For the full license, please visit:
+ * http://creativecommons.org/licenses/by-nc/3.0/legalcode
+ * 
+ * 
+ * Calculates and records radial distribution function.
+ * 
+ * @author dbborens@princeton.edu
+ *
+ */
+public class RdfWriter {
+
+	private Parameters p;
+	
+
+	private int simulations = 0;
+	private int maxRadius;
+	
+	/* The sum of the average per-simulation density as a function of radius.
+	 * We will divide this by the number of simulations to get the cumulative
+	 * density. The key is the squared displacement (Euclidean), and the value
+	 * is the total densities observed there.
+	 */
+	private HashMap<Integer, Double> totals;
+	
+	// A count of the number of positions having each given displacement.
+	// I'm sure there's a nice geometric way to do this.
+	private HashMap<Integer, Double> areaMap;
+	
+	public RdfWriter(Parameters p) {
+		this.p = p;
+		maxRadius = calcMaxRadius();
+		totals = new HashMap<Integer, Double>();
+		areaMap = calcAnnulusAreas();
+	}
+	
+	private int calcMaxRadius() {		
+		// radius=0 corresponds to a single point.
+		return (p.W() - 1) / 2;
+	}
+
+	public void push(AbstractLifeCycle ca, int particles) {
+		HashMap<Integer, Double> densities = new HashMap<Integer, Double>();
+		
+		if (particles < p.getHaltCount())
+			throw new IllegalStateException("RDF calculator was called at insufficient density.");
+		
+		// Reference (ideal) density
+		//double meanSquared = Math.pow((particles * 1.0D) / p.N(), 2.0);
+		
+		
+		// Sum over rho_i*rho_j for all j at the same Euclidean distance
+		// from i, but only for all rho_i = 1. 
+		for (int x = 0; x < p.W(); x++) {
+			for (int y = 0; y < p.W(); y++) {
+				if (ca.getTypeAt(x, y) == AbstractCell.CHEATER) {					
+					contribute(ca, densities, x, y);
+				}
+			}
+		}
+		
+		Iterator<Integer> i = densities.keySet().iterator();
+		
+		while (i.hasNext()) {
+			Integer sqDisp = i.next();
+			
+			// Divide all the rho_i*rho_j by the number of non-zero i
+			// positions to get <rho_i rho_j>.
+			//double contrib = (densities.get(sqDisp) / p.N()) - meanSquared;
+			double contrib = (densities.get(sqDisp) / particles);
+			//System.out.println("Cumulative density: " + densities.get(sqDisp) + ". Number of particles: " + particles + ". Simulation contribution: " + contrib + ".");
+			if (!totals.containsKey(sqDisp))
+				totals.put(sqDisp, 0D);
+			
+			double newTtl = totals.get(sqDisp) + contrib;
+			totals.put(sqDisp, newTtl);
+ 		}
+		
+		// Increment the number of simulations considered
+		simulations++;
+	}
+
+	/**
+	 * Calculate <rho_i rho_j> for a given cheater (rho_i = 1).
+	 * 
+	 * We only need to calculate this when rho_i=1 because
+	 * when rho_i=0 (true for all cooperators) the quantity is 0
+	 * for all j, and hence the average is 0.
+	 * 
+	 */
+	private void contribute(AbstractLifeCycle ca,
+			HashMap<Integer, Double> densities, int x, int y) {
+		
+		HashMap<Integer, Double> particleMap = makeParticleMap(x, y, ca);
+		
+		Iterator<Integer> i = particleMap.keySet().iterator();
+		//System.out.println("NEW PARTICLE");
+		while (i.hasNext()) {
+			Integer sqDisp = i.next();
+			double mass = particleMap.get(sqDisp);
+			double area = areaMap.get(sqDisp);
+			double density = mass / area;
+			//System.out.println("   m(" + sqDisp + ")=" + mass + "; a(" + sqDisp + ")=" + area + ". d(" + sqDisp + ")=" + density);
+
+			
+			if (!densities.containsKey(sqDisp))
+				densities.put(sqDisp, 0D);
+			
+			double newDensity = densities.get(sqDisp) + density;
+			densities.put(sqDisp, newDensity);
+		}
+	}
+
+	/**
+	 * Given the location of a "particle" (=cheater in cooperation model, or blue in
+	 * invasion model), get the total number of particles in each Euclidean annulus
+	 * from that position. The annulus is defined as all positions with a particular
+	 * Euclidean displacement from the reference particle.
+	 * 
+	 */
+	private HashMap<Integer, Double> makeParticleMap(int x, int y, AbstractLifeCycle ca) {
+		
+		// We're only in this method if the origin is an invader, so set
+		// the r=0 density to 1 
+		HashMap<Integer, Double> particles = new HashMap<Integer, Double>();
+		particles.put(0, 1D);
+		
+		for (int dx = -1 * maxRadius; dx <= maxRadius; dx++) {
+			for (int dy = -1 * maxRadius; dy <= maxRadius; dy++) {
+				// We already handled this case
+				if (dx == 0 && dy == 0)
+					continue;
+				
+				// Why doesn't Java have native integer exponentiation?
+				Integer sqDisplacement = (dx * dx) + (dy * dy);
+				double particle = consider(x + dx, y + dy, ca);
+				
+				if (!particles.containsKey(sqDisplacement))
+					particles.put(sqDisplacement, 0D);
+				
+				double newParticles = particles.get(sqDisplacement) + particle;
+				particles.put(sqDisplacement, newParticles);
+					
+			}
+		}
+		
+		return particles;
+	}
+
+	private double consider(int x, int y, AbstractLifeCycle ca) {
+		
+		int xw = wrap(x);
+		int yw = wrap(y);
+		
+		if (ca.getTypeAt(xw, yw) == AbstractCell.CHEATER)
+			return 1D;
+		
+		return 0D;
+	}
+
+	private HashMap<Integer, Double> calcAnnulusAreas() {
+		HashMap<Integer, Double> areas = new HashMap<Integer, Double>();
+		
+		areas.put(0, 1D);
+		for (int dx = -1 * maxRadius; dx <= maxRadius; dx++) {
+			for (int dy = -1 * maxRadius; dy <= maxRadius; dy++) {
+				if (dx == 0 && dy == 0)
+					continue;
+				
+				Integer sqDisp = (dx * dx) + (dy * dy);
+				
+				if (!areas.containsKey(sqDisp))
+					areas.put(sqDisp, 0D);
+				
+				Double newArea = areas.get(sqDisp) + 1D;
+				areas.put(sqDisp, newArea);
+			}
+		}
+		
+		//Iterator<Integer> i = areas.keySet().iterator();
+		//while (i.hasNext())
+		//	System.out.print(i.next() + " ");
+		//System.out.println();
+		
+		return areas;
+	}
+	
+	/**
+	 * Returns an x value that takes into account horizontal periodic
+	 * boundary conditions.
+	 */
+	private int wrap(int x) {
+		int w = p.W();
+		
+		// Java's % operator is actually a remainder, so for negative numbers it doesn't
+		// do what one might expect for a "modulo" operator
+		return(x < 0 ? (x % w + w) % w : x % w);
+	}
+	
+	public void close() {
+		SortedSet<Integer> displacements = new TreeSet<Integer>(totals.keySet()); 
+
+		HashMap<Integer, Double> rdf = new HashMap<Integer, Double>();
+		Iterator<Integer> i = displacements.iterator();
+
+		while (i.hasNext()) {
+			Integer sqDisp = i.next();
+			Double ttl = totals.get(sqDisp);
+			double rdf_d = ttl / simulations;
+			
+			rdf.put(sqDisp, rdf_d);
+		}
+
+		writeToFile(rdf, displacements);
+
+	}
+
+	private void writeToFile(HashMap<Integer, Double> rdf, SortedSet<Integer> displacements) {
+		try {
+			mkDir();
+			String fileName = p.getRootPath() + "/rdf.txt";
+			File file = new File(fileName);
+			FileWriter fw = new FileWriter(file);
+			BufferedWriter bw = new BufferedWriter(fw);
+			
+			double ttl = 0D;
+			Iterator<Integer> i = displacements.iterator();
+			
+			while (i.hasNext()) {
+				Integer r = i.next();
+				StringBuilder sb = new StringBuilder();
+				sb.append(r);
+				sb.append("\t");
+				sb.append(rdf.get(r));
+				sb.append("\n");
+				bw.write(sb.toString());
+				ttl += rdf.get(r);
+			}
+			
+			StringBuilder sb = new StringBuilder("\n");
+			sb.append("# Observations: ");
+			sb.append(simulations);
+			sb.append("\nCumulative: ");
+			sb.append(ttl);
+			sb.append('\n');
+			bw.write(sb.toString());
+			
+			bw.close();
+		} catch (IOException ex) {
+			throw new RuntimeException(ex);
+		}
+	}
+	
+	private void mkDir() {
+		File path = new File(p.getRootPath());
+		if (!path.exists()) {
+			try {
+				path.mkdirs();
+			} catch (Exception ex) {
+				throw new RuntimeException("Could not create directory tree " + p.getRootPath());
+			}			
+		}
+	}
+}

@@ -1,0 +1,238 @@
+package structures.distributions;
+
+
+import operations.matrix.Decay;
+import operations.matrix.Diffusion;
+import no.uib.cipr.matrix.*;
+import no.uib.cipr.matrix.sparse.*;
+import java.util.Arrays;
+
+import structures.MatrixUtils;
+
+import control.parameters.Parameters;
+
+/**
+ * Precomputes the steady state distribution of some substance
+ * that diffuses with constant decay from a continuous point
+ * source at the origin.
+ * 
+ * @author dbborens@princeton.edu
+ *
+ */
+public class CenterOriginDistribution implements AbstractPointDistribution {
+
+	// The dimensionless parameter R = ( alpha * dt ) / (dx)^2 controls
+	// the error of the discrete Laplacian. In two dimensions, the Laplacian
+	// fails to converge if R > 0.25. We choose a much lower R to minimize
+	// error. We assume that dx=1.
+	
+	
+	private Double[] solution;
+	
+	private Parameters p;
+	private int x0;
+	private int y0;
+	/**
+	 * 
+	 * @param h Height of the system.
+	 * @param w Width of the system.
+	 * @param alpha Diffusion constant.
+	 * @param mu Decay constant.
+	 * @param rho Production constant.
+	 */
+	public CenterOriginDistribution (Parameters p) {
+		this.p = p;
+		
+		// In the special case of zero production, skip all the logic and just
+		// populate the solution with zeros.
+		if (p.getProduction() < p.epsilon()) {
+			System.out.println("No production: using trivial solute distribution.");
+			trivialSolution();
+			return;
+		}
+		
+		// We want to solve c = [decay - diffusion]^-1 source,
+		// so operator is decay-diffusion.
+		CompDiagMatrix operator = buildOperator(p.getDiffusion(), p.getDecay());
+
+		// Source vector is just rho * dt at the origin.
+		Vector source = new SparseVector(p.N(), 1);
+		
+		// Origin should be center coordinate
+		x0 = p.W() / 2;
+		y0 = p.H() / 2;
+				
+		source.set(origin(), p.getProduction());
+		
+		System.out.println("Calculating distribution...");
+		solution = solve(operator, source);
+		
+		sanityCheck();
+	}
+
+	private void trivialSolution() {
+		solution = new Double[p.N()];
+		
+		for (int i = 0; i < p.N(); i++)
+			solution[i] = 0D;
+	}
+
+	/* (non-Javadoc)
+	 * @see structures.AbstractPointDistribution#origin()
+	 */
+	@Override
+	public int origin() {
+		return (y0 * p.W()) + x0;
+	}
+	
+	private Double[] solve (CompDiagMatrix operator, Vector source) {
+		int n = p.N();
+		Vector template = source.copy();
+		
+		IterativeSolver solver = new CGS(template);
+		Preconditioner preconditioner = new DiagonalPreconditioner(n);
+		preconditioner.setMatrix(operator);
+		//solver.getIterationMonitor().setIterationReporter(new OutputIterationReporter());
+
+		Vector sol = new DenseVector(n);
+		
+		try {
+			solver.solve(operator, source, sol);
+		} catch (IterativeSolverNotConvergedException ex) {
+			ex.printStackTrace();
+		}
+		
+		return MatrixUtils.toArray(sol);
+		
+	}
+	
+	private CompDiagMatrix buildOperator(double diffusion, double decay) {
+		
+		CompDiagMatrix A = new CompDiagMatrix(p.N(), p.N());
+		A.add(new Decay(p.N(), decay));
+		A.add(MatrixUtils.I(p.N()));
+		
+		Diffusion grad = new Diffusion(p);
+		grad.scale(-1D);
+		
+		A.add(grad);
+
+		return A;
+	}
+	
+	/* (non-Javadoc)
+	 * @see structures.AbstractPointDistribution#get(int, int)
+	 */
+	@Override
+	public Double get(int x, int y) {
+		
+		//System.out.println("Trying to get (" + x + ", " + y + ").");
+		/*
+		 * Since we are using periodic boundary conditions, we want
+		 * x + W == x and y + H == y.
+		 */		
+		int x1 = xWrap(x);
+		int y1 = yWrap(y);
+		
+		//System.out.println("Wrapped to (" + x1 + ", " + y1 + ").");
+		
+		int i = x1 + p.W() * y1;
+		//System.out.println("Index is " + i);
+		
+		return solution[i];
+	}
+	
+	public int xWrap(int x) {
+		// First, perform a modulo on the value of x so that x + W = x.
+		int xw = x < 0 ? (x % p.W() + p.W()) % p.W() : x % p.W();
+		
+		// We can think of the x-axis as a circle. There are two paths from the "origin"
+		// to the cell in question. We want the shorter one.
+		int a = Math.abs(x0 - xw);
+		int b = Math.abs(p.W() - a);
+		
+		
+		return smaller(a, b);
+	}
+	
+
+	public int yWrap(int y) {
+		// First, perform a modulo on the value of y so that y + H = y.
+		int yw = y < 0 ? (y % p.H() + p.H()) % p.H() : y % p.H();
+
+		// We can think of the y-axis as a circle. There are two paths from the "origin"
+		// to the cell in question. We want the shorter one.
+		int a = Math.abs(y0 - yw);
+		int b = p.H() - a;
+
+		return smaller(a, b);		
+	}
+
+	private int smaller(int a, int b) {
+		if (a < b)
+			return a;
+		else
+			return b;
+	}
+	
+	private void sanityCheck() {
+		System.out.println("Performing consistency checks.");
+		double epsilon = calcEpsilon();
+		
+		Double[] solSorted = new Double[solution.length];
+		
+		// Deep copy solution
+		for (int i = 0; i < solution.length; i++)
+			solSorted[i] = solution[i];
+		
+		Arrays.sort(solSorted);
+		
+		if (solution[origin()] != solSorted[solution.length - 1])
+			throw new IllegalStateException("Highest value is not as source positions!");
+		
+		for (int x = 0; x < (p.W() / 2) - 1; x++) {
+			
+			// Check radius
+			if (get(x+1, 0) > get(x, 0))
+				throw new IllegalStateException("Distribution failed to decrease monotonically with radius.");
+
+			// Check diagonal line along x=y
+			if (get(x+1, x+1) > get(x, x))
+				throw new IllegalStateException("Distribution failed to decrease monotonically with radius.");
+
+			for (int y = 0; y < (p.H() / 2) - 1; y++) {
+				if (get(x, y) - get(-1 * x, y) > epsilon)
+					throw new IllegalStateException("Symmetry failure."  + get(x, y) + " != " + get(-1 * x, y));
+				
+				if (get(x, y) - get(x, -1 * y) > epsilon)
+					throw new IllegalStateException("Symmetry failure: " + get(x, y) + " != " + get(x, -1 * y));
+
+				if (get(x, y) - get(-1 * x, -1 * y) > epsilon)
+					throw new IllegalStateException("Symmetry failure." + get(x, y) + " != " + get(-1 * x, -1 * y));
+
+				// Should never blow up
+				get(p.W() * 2, p.H() * 2);
+			}
+		}	
+		
+		System.out.println("Distribution passed consistency checks.");
+	}
+	
+	private double calcEpsilon() {
+        double machEps = 1.0d;
+        
+        do {
+           machEps /= 2d;
+        } while (1d + (machEps/2d) != 1d);
+        
+        return machEps;
+	}
+	
+	/* (non-Javadoc)
+	 * @see structures.AbstractPointDistribution#getSolution()
+	 */
+	@Override
+	public Double[] getSolution() {
+		return solution;
+	}
+}

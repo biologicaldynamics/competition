@@ -1,0 +1,34 @@
+<project>
+
+	<path id="project.class.path">
+		<pathelement location="lib/netlib-java/arpack_combo-0.1.jar" />
+		<pathelement location="lib/netlib-java/netlib-java-0.9.3.jar" />
+	</path>
+
+	<target name="clean">
+		<delete dir="build"/>
+	</target>
+
+	<target name="build">
+		<mkdir dir="build/classes"/>
+		<javac srcdir="src" destdir="build/classes">
+			<classpath refid="project.class.path" />
+		</javac>
+	</target>
+
+	<target name="jar">
+		<mkdir dir="build/jar"/>
+		<jar destfile="build/efficient.jar" basedir="build/classes">
+			<manifest>
+				<attribute name="Main-Class" value="control.RunFromArguments"/>
+			</manifest>
+		</jar>
+	</target>
+
+	<target name="run">
+		<java jar="build/efficient.jar" fork="true">
+			<arg line="${args}" />
+		</java>	
+	</target>
+
+</project>
